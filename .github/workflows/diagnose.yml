@@ -1,0 +1,42 @@
+name: 파일 상태 진단
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Restore DB from artifact
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: kosha-db
+          workflow: crawler.yml
+          workflow_conclusion: success
+          path: data/
+          if_no_artifact_found: warn
+
+      - name: Unzip DB if needed
+        run: |
+          if [ -f data/kosha-db.zip ]; then
+            unzip -o data/kosha-db.zip -d data/
+            rm data/kosha-db.zip
+          fi
+          ls -la data/ || true
+
+      - name: Run diagnosis
+        env:
+          NAVER_CLIENT_ID:      ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET:  ${{ secrets.NAVER_CLIENT_SECRET }}
+          NAVER_REFRESH_TOKEN:  ${{ secrets.NAVER_REFRESH_TOKEN }}
+          NAVER_CAFE_CLUB_ID:   "31767633"
+          NAVER_CAFE_MENU_ID:   "12"
+        run: python scripts/diagnose_files.py
