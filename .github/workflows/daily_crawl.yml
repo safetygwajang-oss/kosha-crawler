@@ -27,6 +27,14 @@ jobs:
           path: data/
         continue-on-error: true
 
+      - name: 🔍 DB 상태 진단
+        run: |
+          echo "===== data/ 폴더 내용 ====="
+          ls -lah data/ || echo "data/ 폴더 없음"
+          echo ""
+          echo "===== DB 진단 스크립트 ====="
+          python scripts/diagnose_db.py || echo "진단 스크립트 없음 - 스킵"
+
       - name: Run crawler + cafe upload
         env:
           NAVER_CLIENT_ID:      ${{ secrets.NAVER_CLIENT_ID }}
@@ -38,6 +46,13 @@ jobs:
           SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python scripts/run_once.py
 
+      - name: 🔍 실행 후 DB 상태
+        if: always()
+        run: |
+          echo "===== 실행 후 DB 크기 ====="
+          ls -lah data/
+          python scripts/diagnose_db.py || true
+
       - name: Upload DB
         uses: actions/upload-artifact@v4
         if: always()
@@ -45,6 +60,7 @@ jobs:
           name: kosha-db
           path: data/kosha.db
           retention-days: 90
+          overwrite: true
 
       - name: Upload logs
         uses: actions/upload-artifact@v4
