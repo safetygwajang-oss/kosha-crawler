@@ -1,15 +1,11 @@
-"""네이버 카페에 크롤링 결과를 게시글로 업로드
+"""네이버 카페 업로드 (이미지 첨부 + KOSHA 원본 링크)
 
-✅ 검증된 인코딩 방식: 이중 URL 인코딩 (Double URL Encoding)
-   - quote(quote(text, safe=''), safe='')
-   - Content-Type: application/x-www-form-urlencoded
-   - body는 문자열로 조립 후 UTF-8 바이트로 전송
-   
-   네이버 카페 서버가 MS949 환경이라 UTF-8 %인코딩 문자열(%EC%9D...)을
-   한 번 더 %인코딩해서(%25EC%259D...) 보내면 서버가 두 번 디코딩하여
-   원래 한글로 정상 복원됨.
+✅ 인코딩: 이중 URL 인코딩 (검증됨)
+✅ 이미지 첨부: KOSHA 썸네일을 즉시 다운로드해 image 필드로 multipart 전송
+✅ PDF 등 파일: 본문에 KOSHA 원본 링크 삽입 (네이버 API는 이미지만 지원)
 """
 import time
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote
@@ -21,80 +17,162 @@ from .utils import setup_logging
 
 log = setup_logging("cafe_uploader")
 
-# 네이버 카페 연속 등록 차단 회피용 - 글 사이 대기 시간(초)
 UPLOAD_INTERVAL_SEC = 25
-# 실패 시 추가 대기(초)
 FAILURE_BACKOFF_SEC = 60
+
+# KOSHA 원본 상세 페이지 URL 템플릿 (med_seq 기반)
+# 실제 KOSHA 사이트 구조에 맞게 필요시 조정
+KOSHA_DETAIL_URL = "https://www.kosha.or.kr/kosha/report/medFocData.do?medSeq={med_seq}"
+
+# 네이버 카페 이미지 첨부 제한
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif"}
 
 
 def naver_double_encode(text: str) -> str:
-    """네이버 카페 API용 이중 URL 인코딩.
-    
-    한글 → %EC%9D%B4... → %25EC%259D%25B4...
-    네이버 서버가 두 번 디코딩하여 원래 한글로 복원.
-    """
+    """네이버 카페 API용 이중 URL 인코딩 (검증됨)"""
     if not text:
         return ""
-    first = quote(text, safe='')
-    second = quote(first, safe='')
-    return second
+    return quote(quote(text, safe=''), safe='')
+
+
+def _download_thumbnail(media: Media) -> Path | None:
+    """KOSHA 썸네일을 임시 파일로 즉시 다운로드.
+    성공 시 파일 경로 반환, 실패 시 None.
+    호출자가 사용 후 파일 삭제 책임.
+    """
+    if not media.thumbnail_url:
+        return None
+
+    try:
+        # 절대 URL 조립
+        url = media.thumbnail_url
+        if url.startswith("/"):
+            url = settings.KOSHA_BASE_URL.rstrip("/") + url
+
+        r = requests.get(url, timeout=30, stream=True)
+        if r.status_code != 200:
+            log.warning(f"  썸네일 다운로드 실패 HTTP {r.status_code}: {url}")
+            return None
+
+        # 확장자 추출 (Content-Type 우선, URL suffix 보조)
+        ct = r.headers.get("Content-Type", "").lower()
+        if "png" in ct:
+            ext = ".png"
+        elif "gif" in ct:
+            ext = ".gif"
+        else:
+            ext = ".jpg"
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        size = 0
+        for chunk in r.iter_content(8192):
+            tmp.write(chunk)
+            size += len(chunk)
+            if size > MAX_IMAGE_SIZE:
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                log.warning(f"  썸네일 크기 초과({size}): {url}")
+                return None
+        tmp.close()
+
+        if size == 0:
+            Path(tmp.name).unlink(missing_ok=True)
+            return None
+
+        log.info(f"  썸네일 다운로드 완료: {size:,} bytes ({ext})")
+        return Path(tmp.name)
+
+    except Exception as e:
+        log.warning(f"  썸네일 다운로드 예외: {e}")
+        return None
 
 
 def _build_content(media: Media) -> str:
-    """게시글 HTML 본문 구성 (원본 한글 그대로 - 인코딩은 전송 직전에)"""
+    """게시글 본문 HTML (원본 링크 포함)"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
+    # KOSHA 원본 페이지 링크
+    kosha_link = KOSHA_DETAIL_URL.format(med_seq=media.med_seq)
+
+    # 파일 목록 (KOSHA 원본에서 다운로드 안내)
     file_lines = []
     for f in media.files:
-        file_lines.append(f"- {f.original_name} ({f.size:,} bytes)")
+        file_lines.append(f"📎 {f.original_name}")
     files_block = "<br>".join(file_lines) if file_lines else "(첨부파일 없음)"
 
     desc = (media.description or "").replace(chr(10), '<br>')
 
     parts = [
         f"<h3>{media.title or ''}</h3>",
-        f"<p><b>등록일:</b> {reg_fmt}<br>",
-        f"<b>발행번호:</b> {media.pbls_no or ''}<br>",
-        f"<b>유형:</b> {media.shp_nm or ''}</p>",
+        f"<p>",
+        f"<b>📅 등록일:</b> {reg_fmt}<br>",
+        f"<b>📄 발행번호:</b> {media.pbls_no or ''}<br>",
+        f"<b>📂 유형:</b> {media.shp_nm or ''}",
+        f"</p>",
         "<hr>",
         f"<p>{desc}</p>",
         "<hr>",
-        f"<p><b>[첨부파일]</b><br>{files_block}</p>",
-        f"<p><small>KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
+        f"<p><b>📥 첨부파일 다운로드</b><br>",
+        f"{files_block}<br><br>",
+        f"👉 <a href='{kosha_link}' target='_blank'><b>KOSHA 원본 페이지에서 다운로드</b></a><br>",
+        f"<small>({kosha_link})</small>",
+        f"</p>",
+        "<hr>",
+        f"<p><small>🤖 KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
     ]
     return "\n".join(parts)
 
 
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건을 카페에 업로드.
-    
-    ✅ 검증된 방식: 이중 URL 인코딩 + 문자열 body + UTF-8 전송
-    """
+    """미디어 1건을 카페에 업로드 (이미지 첨부 시도)"""
     token = token_mgr.get_token()
 
-    # 원본 한글 텍스트 준비
     subject_raw = f"[KOSHA] {media.title or ''}"
     content_raw = _build_content(media)
 
-    # 네이버 이중 인코딩 적용
     subject_encoded = naver_double_encode(subject_raw)
     content_encoded = naver_double_encode(content_raw)
 
-    # 문자열 body 조립 (dict 사용 금지 - requests가 자동 인코딩 시도함)
-    body = f"subject={subject_encoded}&content={content_encoded}"
+    # 썸네일 즉시 다운로드 시도
+    thumb_path = _download_thumbnail(media)
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-
-    r = requests.post(
-        settings.cafe_article_api,
-        headers=headers,
-        data=body.encode("utf-8"),
-        timeout=60,
-    )
+    try:
+        if thumb_path and thumb_path.exists():
+            # multipart로 이미지 첨부
+            mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
+            with thumb_path.open("rb") as fp:
+                files = {
+                    "subject": (None, subject_encoded),
+                    "content": (None, content_encoded),
+                    "image": (thumb_path.name, fp.read(), mime, {"Expires": "0"}),
+                }
+                r = requests.post(
+                    settings.cafe_article_api,
+                    headers={"Authorization": f"Bearer {token}"},
+                    files=files,
+                    timeout=60,
+                )
+        else:
+            # 이미지 없이 form-urlencoded
+            body = f"subject={subject_encoded}&content={content_encoded}"
+            r = requests.post(
+                settings.cafe_article_api,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data=body.encode("utf-8"),
+                timeout=60,
+            )
+    finally:
+        # 임시 파일 정리
+        if thumb_path:
+            try:
+                thumb_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     if r.status_code != 200:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
@@ -112,9 +190,8 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
 
 
 def upload_pending(limit: int = 20) -> dict:
-    """미업로드분을 배치 업로드 (연속 등록 방지 delay 포함)"""
     if not settings.NAVER_UPLOAD_ENABLED:
-        log.info("카페 업로드 비활성화(NAVER_UPLOAD_ENABLED=false)")
+        log.info("카페 업로드 비활성화")
         return {"uploaded": 0, "errors": 0, "skipped": True}
 
     required = [
@@ -123,7 +200,7 @@ def upload_pending(limit: int = 20) -> dict:
         settings.NAVER_CAFE_MENU_ID
     ]
     if not all(required):
-        log.error("네이버 카페 설정 누락 - .env 확인")
+        log.error("네이버 카페 설정 누락")
         return {"uploaded": 0, "errors": 0, "skipped": True}
 
     token_mgr = NaverTokenManager()
