@@ -6,7 +6,7 @@ on:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,28 +15,32 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
 
-      - name: Restore DB from artifact
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          name: kosha-db
-          workflow: crawler.yml
-          workflow_conclusion: success
-          path: data/
-          if_no_artifact_found: warn
-
-      - name: Unzip DB if needed
-        run: |
-          if [ -f data/kosha-db.zip ]; then
-            unzip -o data/kosha-db.zip -d data/
-            rm data/kosha-db.zip
-          fi
-          ls -la data/ || true
-
-      - name: Run diagnosis
+      - name: 크롤링 1페이지만 실행 (파일/썸네일 다운로드 확인용)
         env:
           NAVER_CLIENT_ID:      ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET:  ${{ secrets.NAVER_CLIENT_SECRET }}
           NAVER_REFRESH_TOKEN:  ${{ secrets.NAVER_REFRESH_TOKEN }}
           NAVER_CAFE_CLUB_ID:   "31767633"
           NAVER_CAFE_MENU_ID:   "12"
+          NAVER_UPLOAD_ENABLED: "false"
+          MAX_PAGES: "1"
+        run: python scripts/run_once.py
+
+      - name: data/ 폴더 실물 확인
+        run: |
+          echo "===== data/ ====="
+          ls -la data/ || echo "(없음)"
+          echo ""
+          echo "===== data/files/ ====="
+          ls -la data/files/ 2>/dev/null | head -30 || echo "(없음)"
+          echo ""
+          echo "===== data/thumbnails/ ====="
+          ls -la data/thumbnails/ 2>/dev/null | head -30 || echo "(없음)"
+          echo ""
+          echo "===== 파일 크기 총합 ====="
+          du -sh data/files/ data/thumbnails/ 2>/dev/null || true
+
+      - name: DB ↔ 실물 대조 및 Media 모델 필드 출력
+        env:
+          NAVER_UPLOAD_ENABLED: "false"
         run: python scripts/diagnose_files.py
