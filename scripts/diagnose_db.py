@@ -1,8 +1,7 @@
 """DB 상태 진단 스크립트"""
 import sys
 from pathlib import Path
-
-sys.path.insert(0, "src")
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kosha_crawler.storage import get_session, Media, MediaFile
 from kosha_crawler.config import settings
@@ -44,6 +43,6 @@ with get_session() as db:
         print(f"  [{m.med_seq}] {status} {title}")
         if m.cafe_upload_error:
             err = m.cafe_upload_error[:80]
-            print(f"         └ {err}")
+            print(f"         -> {err}")
 
     print("=" * 70)
