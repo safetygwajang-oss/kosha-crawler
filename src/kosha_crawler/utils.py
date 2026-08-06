@@ -8,7 +8,7 @@ def safe_filename(name: str) -> str:
     """파일 시스템에 안전한 이름으로 변환"""
     for ch in '<>:"/\\|?*\n\r\t':
         name = name.replace(ch, "_")
-    return name.strip()[:200]  # 너무 긴 이름 방지
+    return name.strip()[:200]
 
 
 def setup_logging(name: str = "kosha") -> logging.Logger:
