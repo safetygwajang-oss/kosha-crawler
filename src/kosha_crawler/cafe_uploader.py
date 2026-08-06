@@ -1,9 +1,8 @@
-"""네이버 카페 업로드 (검증된 이중 인코딩 방식)
+"""네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
 
-✅ 제목/본문 모두 이중 URL 인코딩
-✅ urlencoded 방식으로 통일 (multipart 제거)
-✅ 썸네일은 본문에 <img> 태그로 삽입 (KOSHA 원본 URL)
-✅ 줄바꿈은 <br> 태그로 변환
+✅ multipart로 이미지 첨부 (네이버 카페가 본문에 자동 삽입)
+✅ subject/content는 이중 URL 인코딩 (한글 깨짐 방지)
+✅ 본문 줄바꿈은 <br> 태그로 변환
 """
 import time
 from pathlib import Path
@@ -25,7 +24,7 @@ KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arc
 
 
 # ============================================
-# 🔧 인코딩 유틸 (검증된 방식)
+# 🔧 인코딩 유틸
 # ============================================
 
 def naver_double_encode(text: str) -> str:
@@ -50,7 +49,7 @@ def convert_newlines_to_br(text: str) -> str:
 # 📝 본문 생성
 # ============================================
 
-def _build_content(media: Media, thumb_url: str = None) -> str:
+def _build_content(media: Media) -> str:
     """게시글 본문 HTML"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
@@ -59,20 +58,9 @@ def _build_content(media: Media, thumb_url: str = None) -> str:
     search_kw = quote(media.title or "", safe='')
     kosha_search = f"{KOSHA_ARCHIVE_HOME}?searchKeyword={search_kw}"
 
-    file_lines = []
-    for f in media.files:
-        file_lines.append(f"📎 {f.original_name}")
-    files_block = "<br>".join(file_lines) if file_lines else "(첨부파일 없음)"
-
     desc = (media.description or "").replace(chr(10), '<br>')
 
-    parts = []
-
-    # 썸네일 이미지 (있으면 상단에)
-    if thumb_url:
-        parts.append(f"<p><img src='{thumb_url}' alt='썸네일' /></p>")
-
-    parts.extend([
+    parts = [
         f"<h3>{media.title or ''}</h3>",
         f"<p>",
         f"<b>📅 등록일:</b> {reg_fmt}<br>",
@@ -83,69 +71,74 @@ def _build_content(media: Media, thumb_url: str = None) -> str:
         "<hr>",
         f"<p>{desc}</p>",
         "<hr>",
-        f"<p><b>📥 첨부파일 (KOSHA 원본에서 다운로드)</b><br>",
-        f"{files_block}</p>",
-        f"<p>👉 <a href='{kosha_search}' target='_blank'><b>KOSHA에서 이 자료 검색하기</b></a><br>",
-        f"👉 <a href='{KOSHA_ARCHIVE_HOME}' target='_blank'>KOSHA 안전보건자료실 바로가기</a></p>",
+        f"<p>👉 <a href='{kosha_search}' target='_blank'><b>KOSHA에서 이 자료 검색하기</b></a></p>",
         "<hr>",
         f"<p><small>🤖 KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
-    ])
+    ]
     return "\n".join(parts)
 
 
-def _get_thumbnail_url(media: Media) -> str | None:
-    """
-    KOSHA 원본 썸네일 URL 반환
-    - media 객체에 thumbnail_url 필드가 있으면 그거 사용
-    - 없으면 med_seq로 KOSHA 썸네일 API URL 생성
-    """
-    # 우선순위 1: DB에 저장된 원본 URL
-    if hasattr(media, 'thumbnail_url') and media.thumbnail_url:
-        return media.thumbnail_url
-    
-    # 우선순위 2: med_seq 기반 KOSHA 썸네일 API
-    if media.med_seq:
-        return f"https://portal.kosha.or.kr/archive/cent-archive/master-arch/master-list4/viewThumbnail?medSeq={media.med_seq}"
-    
+def _get_thumbnail_path(media: Media) -> Path | None:
+    """DB에 저장된 썸네일 경로에서 실물 확인"""
+    if not media.thumbnail_path:
+        return None
+    p = Path(media.thumbnail_path)
+    if p.exists() and p.stat().st_size > 0:
+        return p
+    log.warning(f"  썸네일 실물 없음: {media.thumbnail_path}")
     return None
 
 
 # ============================================
-# 🚀 업로드 (검증된 이중 인코딩 방식)
+# 🚀 업로드 (multipart + 이중 인코딩 조합)
 # ============================================
 
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건 업로드 - 이중 인코딩 방식"""
+    """미디어 1건 업로드 - 썸네일 있으면 image 첨부, 없으면 텍스트만"""
     token = token_mgr.get_token()
 
     # 원문 생성
     subject_raw = f"[KOSHA] {media.title or ''}"
-    thumb_url = _get_thumbnail_url(media)
-    content_raw = _build_content(media, thumb_url=thumb_url)
+    content_raw = _build_content(media)
 
-    # ⭐ 줄바꿈 → <br> 변환
+    # ⭐ 본문 줄바꿈 → <br> 변환
     content_html = convert_newlines_to_br(content_raw)
 
     # ⭐ 이중 인코딩 (제목/본문 동일)
     subject_encoded = naver_double_encode(subject_raw)
     content_encoded = naver_double_encode(content_html)
 
-    # body 조립
-    body = f"subject={subject_encoded}&content={content_encoded}&openyn=true"
+    thumb_path = _get_thumbnail_path(media)
 
-    log.info(f"  📤 업로드: {subject_raw[:50]}")
-    if thumb_url:
-        log.info(f"  🖼️  썸네일 URL: {thumb_url}")
-
-    r = requests.post(
-        settings.cafe_article_api,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data=body.encode("ascii"),  # ⭐ ASCII 인코딩이 핵심!
-        timeout=60,
-    )
+    if thumb_path:
+        # ✅ multipart with image (네이버가 본문에 자동 첨부)
+        mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
+        with thumb_path.open("rb") as fp:
+            img_bytes = fp.read()
+        files = {
+            "subject": (None, subject_encoded),
+            "content": (None, content_encoded),
+            "image": (thumb_path.name, img_bytes, mime, {"Expires": "0"}),
+        }
+        log.info(f"  📷 썸네일 첨부: {thumb_path.name} ({len(img_bytes):,} bytes)")
+        r = requests.post(
+            settings.cafe_article_api,
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+            timeout=60,
+        )
+    else:
+        # ✅ urlencoded (텍스트만)
+        body = f"subject={subject_encoded}&content={content_encoded}&openyn=true"
+        r = requests.post(
+            settings.cafe_article_api,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data=body.encode("ascii"),
+            timeout=60,
+        )
 
     if r.status_code not in (200, 201):
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
