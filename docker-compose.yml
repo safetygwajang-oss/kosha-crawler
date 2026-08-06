@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  kosha-crawler:
+    build: .
+    container_name: kosha-crawler
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Seoul
