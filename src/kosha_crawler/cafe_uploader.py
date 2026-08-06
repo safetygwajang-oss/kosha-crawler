@@ -1,6 +1,5 @@
 """네이버 카페에 크롤링 결과를 게시글로 업로드"""
 import time
-import urllib.parse
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -13,25 +12,12 @@ log = setup_logging("cafe_uploader")
 
 # 네이버 카페 연속 등록 차단 회피용 - 글 사이 대기 시간(초)
 UPLOAD_INTERVAL_SEC = 20
-# 429/403 등 실패 시 추가 대기(초)
+# 실패 시 추가 대기(초)
 FAILURE_BACKOFF_SEC = 60
 
 
-def _naver_double_encode(text: str) -> str:
-    """네이버 카페 API 전용 이중 URL 인코딩.
-    
-    핵심: UTF-8로 두 번 URL 인코딩해야 네이버가 정상 디코딩함.
-    예: '경력' -> '%EA%B2%BD%EB%A0%A5' -> '%25EA%25B2%25BD%25EB%25A0%25A5'
-    """
-    if not text:
-        return ""
-    first = urllib.parse.quote(text, safe='', encoding='utf-8')
-    second = urllib.parse.quote(first, safe='')
-    return second
-
-
 def _build_content(media: Media) -> str:
-    """게시글 HTML 본문 구성 (원본 한글 그대로 - 인코딩은 상위에서)"""
+    """게시글 HTML 본문 구성 (원본 한글 그대로)"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
@@ -57,17 +43,17 @@ def _build_content(media: Media) -> str:
 
 
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건을 카페에 업로드 (네이버 이중 URL 인코딩 적용)"""
+    """미디어 1건을 카페에 업로드.
+    
+    ⚠️ requests가 data={...}를 자동으로 UTF-8 URL 인코딩하므로,
+       우리는 원본 한글 그대로 넘기면 됨. 절대 quote() 쓰지 말 것!
+    """
     token = token_mgr.get_token()
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 원본 한글 그대로 준비
-    raw_subject = f"[KOSHA] {media.title or ''}"
-    raw_content = _build_content(media)
-
-    # 🔑 네이버 이중 URL 인코딩 (UTF-8, 두 번)
-    subject = _naver_double_encode(raw_subject)
-    content = _naver_double_encode(raw_content)
+    # 원본 한글 그대로 (requests가 알아서 인코딩)
+    subject = f"[KOSHA] {media.title or ''}"
+    content = _build_content(media)
 
     data = {"subject": subject, "content": content}
 
@@ -97,9 +83,9 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
 
     resp = r.json()
-    # 네이버 응답 안에 error가 있는지도 체크 (200이어도 error일 수 있음)
     msg = resp.get("message", {})
-    if msg.get("status") and msg.get("status") != "200":
+    # 200 응답이어도 API 내부 에러가 있는지 확인
+    if msg.get("status") and str(msg.get("status")) != "200":
         err = msg.get("error", {})
         raise RuntimeError(f"API error: {err.get('message', str(resp))}")
 
@@ -144,7 +130,7 @@ def upload_pending(limit: int = 20) -> dict:
 
                 # 마지막 글이 아니면 연속 등록 방지 대기
                 if idx < len(pending) - 1:
-                    log.info(f"  ...다음 글 업로드까지 {UPLOAD_INTERVAL_SEC}초 대기")
+                    log.info(f"  ...다음 글까지 {UPLOAD_INTERVAL_SEC}초 대기")
                     time.sleep(UPLOAD_INTERVAL_SEC)
 
             except Exception as e:
