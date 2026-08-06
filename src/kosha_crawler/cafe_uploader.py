@@ -1,8 +1,9 @@
-"""네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
+"""네이버 카페 업로드 (검증된 이중 인코딩 방식)
 
-✅ 제목: 이중 URL 인코딩 (한글 깨짐 방지)
-✅ 본문: HTML 엔티티 변환 후 → 단일 URL 인코딩 (검증된 방식)
-✅ 이미지: DB의 thumbnail_path 로컬 파일을 image 필드로 multipart 전송
+✅ 제목/본문 모두 이중 URL 인코딩
+✅ urlencoded 방식으로 통일 (multipart 제거)
+✅ 썸네일은 본문에 <img> 태그로 삽입 (KOSHA 원본 URL)
+✅ 줄바꿈은 <br> 태그로 변환
 """
 import time
 from pathlib import Path
@@ -27,35 +28,8 @@ KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arc
 # 🔧 인코딩 유틸 (검증된 방식)
 # ============================================
 
-def sanitize_for_naver(text: str) -> str:
-    """네이버 카페 업로드용 특수문자 처리 (URL 파라미터 충돌 방지)"""
-    if not text:
-        return ""
-    # % → 퍼센트 (URL 인코딩 충돌)
-    text = text.replace('%', '퍼센트')
-    # & → 그리고 (URL 파라미터 구분자 충돌) — S&P는 보존
-    text = text.replace('S&P500', 'S&P 500')
-    text = text.replace('S＆P', 'S&P')
-    text = text.replace('S&P', '§§SNP§§')
-    text = text.replace('&', '그리고')
-    text = text.replace('§§SNP§§', 'S&P')
-    return text
-
-
-def to_html_entity(text: str) -> str:
-    """네이버 카페 API용 HTML 엔티티 변환 (본문용)"""
-    result = []
-    for c in text:
-        code = ord(c)
-        if code > 127 or c in '%&=?#':
-            result.append(f"&#{code};")
-        else:
-            result.append(c)
-    return ''.join(result)
-
-
 def naver_double_encode(text: str) -> str:
-    """네이버 카페 API 제목용 이중 URL 인코딩 (한글 깨짐 방지)"""
+    """네이버 카페 API 전용 이중 URL 인코딩"""
     if not text:
         return ""
     first = quote(text, safe='')
@@ -63,11 +37,20 @@ def naver_double_encode(text: str) -> str:
     return second
 
 
+def convert_newlines_to_br(text: str) -> str:
+    """줄바꿈을 <br>로 변환 (네이버 카페 API가 \\n 무시함)"""
+    if not text:
+        return text
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\n", "<br>")
+    return text
+
+
 # ============================================
 # 📝 본문 생성
 # ============================================
 
-def _build_content(media: Media) -> str:
+def _build_content(media: Media, thumb_url: str = None) -> str:
     """게시글 본문 HTML"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
@@ -83,7 +66,13 @@ def _build_content(media: Media) -> str:
 
     desc = (media.description or "").replace(chr(10), '<br>')
 
-    parts = [
+    parts = []
+
+    # 썸네일 이미지 (있으면 상단에)
+    if thumb_url:
+        parts.append(f"<p><img src='{thumb_url}' alt='썸네일' /></p>")
+
+    parts.extend([
         f"<h3>{media.title or ''}</h3>",
         f"<p>",
         f"<b>📅 등록일:</b> {reg_fmt}<br>",
@@ -100,73 +89,63 @@ def _build_content(media: Media) -> str:
         f"👉 <a href='{KOSHA_ARCHIVE_HOME}' target='_blank'>KOSHA 안전보건자료실 바로가기</a></p>",
         "<hr>",
         f"<p><small>🤖 KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
-    ]
+    ])
     return "\n".join(parts)
 
 
-def _get_thumbnail_path(media: Media) -> Path | None:
-    """DB에 저장된 썸네일 경로에서 실물 확인"""
-    if not media.thumbnail_path:
-        return None
-    p = Path(media.thumbnail_path)
-    if p.exists() and p.stat().st_size > 0:
-        return p
-    log.warning(f"  썸네일 실물 없음: {media.thumbnail_path}")
+def _get_thumbnail_url(media: Media) -> str | None:
+    """
+    KOSHA 원본 썸네일 URL 반환
+    - media 객체에 thumbnail_url 필드가 있으면 그거 사용
+    - 없으면 med_seq로 KOSHA 썸네일 API URL 생성
+    """
+    # 우선순위 1: DB에 저장된 원본 URL
+    if hasattr(media, 'thumbnail_url') and media.thumbnail_url:
+        return media.thumbnail_url
+    
+    # 우선순위 2: med_seq 기반 KOSHA 썸네일 API
+    if media.med_seq:
+        return f"https://portal.kosha.or.kr/archive/cent-archive/master-arch/master-list4/viewThumbnail?medSeq={media.med_seq}"
+    
     return None
 
 
 # ============================================
-# 🚀 업로드
+# 🚀 업로드 (검증된 이중 인코딩 방식)
 # ============================================
 
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건 업로드 - 썸네일 있으면 image 첨부, 없으면 텍스트만"""
+    """미디어 1건 업로드 - 이중 인코딩 방식"""
     token = token_mgr.get_token()
 
-    # 🏆 원문 생성
+    # 원문 생성
     subject_raw = f"[KOSHA] {media.title or ''}"
-    content_raw = _build_content(media)
+    thumb_url = _get_thumbnail_url(media)
+    content_raw = _build_content(media, thumb_url=thumb_url)
 
-    # 🏆 제목: sanitize → 이중 인코딩
-    subject_clean = sanitize_for_naver(subject_raw)
-    subject_encoded = naver_double_encode(subject_clean)
+    # ⭐ 줄바꿈 → <br> 변환
+    content_html = convert_newlines_to_br(content_raw)
 
-    # 🏆 본문: sanitize → HTML 엔티티 변환 → 단일 URL 인코딩
-    content_clean = sanitize_for_naver(content_raw)
-    content_html = to_html_entity(content_clean)
-    content_encoded = quote(content_html)
+    # ⭐ 이중 인코딩 (제목/본문 동일)
+    subject_encoded = naver_double_encode(subject_raw)
+    content_encoded = naver_double_encode(content_html)
 
-    thumb_path = _get_thumbnail_path(media)
+    # body 조립
+    body = f"subject={subject_encoded}&content={content_encoded}&openyn=true"
 
-    if thumb_path:
-        # multipart with image: 인코딩된 ASCII 문자열을 그대로 전송
-        mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
-        with thumb_path.open("rb") as fp:
-            img_bytes = fp.read()
-        files = {
-            "subject": (None, subject_encoded),
-            "content": (None, content_encoded),
-            "image": (thumb_path.name, img_bytes, mime, {"Expires": "0"}),
-        }
-        log.info(f"  📷 썸네일 첨부: {thumb_path.name} ({len(img_bytes):,} bytes)")
-        r = requests.post(
-            settings.cafe_article_api,
-            headers={"Authorization": f"Bearer {token}"},
-            files=files,
-            timeout=60,
-        )
-    else:
-        # urlencoded
-        body = f"subject={subject_encoded}&content={content_encoded}"
-        r = requests.post(
-            settings.cafe_article_api,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            },
-            data=body.encode("utf-8"),
-            timeout=60,
-        )
+    log.info(f"  📤 업로드: {subject_raw[:50]}")
+    if thumb_url:
+        log.info(f"  🖼️  썸네일 URL: {thumb_url}")
+
+    r = requests.post(
+        settings.cafe_article_api,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data=body.encode("ascii"),  # ⭐ ASCII 인코딩이 핵심!
+        timeout=60,
+    )
 
     if r.status_code not in (200, 201):
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
