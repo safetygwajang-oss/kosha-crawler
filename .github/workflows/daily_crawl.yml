@@ -4,10 +4,16 @@ on:
   schedule:
     - cron: "0 21 * * *"   # UTC 21시 = KST 06시
   workflow_dispatch:
+    inputs:
+      upload_limit:
+        description: "카페 업로드 최대 건수 (기본 30)"
+        required: false
+        default: "30"
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -54,6 +60,7 @@ jobs:
           NAVER_CAFE_CLUB_ID:   "31767633"
           NAVER_CAFE_MENU_ID:   "12"
           NAVER_UPLOAD_ENABLED: "true"
+          UPLOAD_LIMIT: ${{ github.event.inputs.upload_limit || '30' }}
         run: python scripts/upload_only.py
 
       - name: DB 상태 진단 (실행 후)
