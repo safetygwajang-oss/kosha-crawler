@@ -1,5 +1,4 @@
 """파일/썸네일 저장 로직"""
-from pathlib import Path
 from .config import settings
 from .api import KoshaAPI
 from .utils import safe_filename
