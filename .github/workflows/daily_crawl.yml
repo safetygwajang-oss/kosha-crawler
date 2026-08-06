@@ -27,8 +27,13 @@ jobs:
           path: data/
         continue-on-error: true
 
-      - name: 🔍 DB 상태 진단 (실행 전)
-        run: python scripts/diagnose_db.py || echo "진단 스킵"
+      - name: DB 상태 진단 (실행 전)
+        run: |
+          echo "===== data/ 폴더 내용 ====="
+          ls -lah data/ || echo "data/ 폴더 없음"
+          echo ""
+          echo "===== DB 진단 ====="
+          python scripts/diagnose_db.py || echo "진단 스킵"
 
       - name: Run crawler + cafe upload
         env:
@@ -41,7 +46,7 @@ jobs:
           SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python scripts/run_once.py
 
-      - name: 📤 카페 업로드 강제 실행 (pending 처리)
+      - name: 카페 업로드 강제 실행 (pending 처리)
         env:
           NAVER_CLIENT_ID:      ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET:  ${{ secrets.NAVER_CLIENT_SECRET }}
@@ -51,9 +56,14 @@ jobs:
           NAVER_UPLOAD_ENABLED: "true"
         run: python scripts/upload_only.py
 
-      - name: 🔍 DB 상태 진단 (실행 후)
+      - name: DB 상태 진단 (실행 후)
         if: always()
-        run: python scripts/diagnose_db.py || true
+        run: |
+          echo "===== data/ 폴더 내용 ====="
+          ls -lah data/
+          echo ""
+          echo "===== DB 진단 ====="
+          python scripts/diagnose_db.py || true
 
       - name: Upload DB
         uses: actions/upload-artifact@v4
