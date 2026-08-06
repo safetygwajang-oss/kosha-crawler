@@ -1,4 +1,5 @@
 """네이버 카페에 크롤링 결과를 게시글로 업로드"""
+import re
 import urllib.parse
 from pathlib import Path
 from datetime import datetime
@@ -11,8 +12,25 @@ from .utils import setup_logging
 log = setup_logging("cafe_uploader")
 
 
+# ms949(cp949) 인코딩 불가 문자(이모지 등) 제거용
+_NON_MS949_RE = re.compile(
+    r'[\U0001F300-\U0001FAFF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF'
+    r'\U0001F900-\U0001F9FF\u2600-\u27BF\u2300-\u23FF]'
+)
+
+
+def _sanitize_for_ms949(text: str) -> str:
+    """ms949로 인코딩할 수 없는 이모지/특수문자 제거 (safety net)"""
+    if not text:
+        return ""
+    # 1차: 알려진 이모지 범위 제거
+    text = _NON_MS949_RE.sub('', text)
+    # 2차: 실제 encode 시도해서 실패 문자는 대체
+    return text.encode('ms949', errors='ignore').decode('ms949')
+
+
 def _build_content(media: Media) -> str:
-    """게시글 HTML 본문 구성"""
+    """게시글 HTML 본문 구성 (ms949 안전)"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
@@ -29,7 +47,7 @@ def _build_content(media: Media) -> str:
         "<hr>",
         f"<p>{(media.description or '').replace(chr(10), '<br>')}</p>",
         "<hr>",
-        f"<p><b>📎 첨부파일</b><br>{files_block}</p>",
+        f"<p><b>[첨부파일]</b><br>{files_block}</p>",
         f"<p><small>※ KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
     ]
     return "\n".join(parts)
@@ -40,9 +58,15 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
     token = token_mgr.get_token()
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 네이버 카페 API는 ms949 인코딩 요구
-    subject = urllib.parse.quote(f"[KOSHA] {media.title}", encoding="ms949")
-    content = urllib.parse.quote(_build_content(media), encoding="ms949")
+    # 네이버 카페 API는 ms949 인코딩 요구 → 이모지 제거 필수
+    raw_subject = f"[KOSHA] {media.title}"
+    raw_content = _build_content(media)
+
+    safe_subject = _sanitize_for_ms949(raw_subject)
+    safe_content = _sanitize_for_ms949(raw_content)
+
+    subject = urllib.parse.quote(safe_subject, encoding="ms949")
+    content = urllib.parse.quote(safe_content, encoding="ms949")
 
     data = {"subject": subject, "content": content}
 
@@ -107,11 +131,11 @@ def upload_pending(limit: int = 20) -> dict:
                 m.cafe_article_url = result.get("articleUrl")
                 m.cafe_upload_error = None
                 stats["uploaded"] += 1
-                log.info(f"✅ 업로드: [{m.med_seq}] {m.title[:40]} → {m.cafe_article_url}")
+                log.info(f"[OK] 업로드: [{m.med_seq}] {m.title[:40]} -> {m.cafe_article_url}")
             except Exception as e:
                 m.cafe_upload_error = str(e)[:1000]
                 stats["errors"] += 1
-                log.error(f"❌ 실패: [{m.med_seq}] {m.title[:40]} - {e}")
+                log.error(f"[FAIL] [{m.med_seq}] {m.title[:40]} - {e}")
             db.commit()
 
     return stats
