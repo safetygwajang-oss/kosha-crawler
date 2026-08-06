@@ -28,5 +28,5 @@ if __name__ == "__main__":
         replace_existing=True,
     )
     log.info(f"스케줄러 시작: 매일 {settings.CRON_HOUR:02d}:{settings.CRON_MINUTE:02d} ({settings.TIMEZONE})")
-    job()  # 시작 시 1회 실행
+    job()
     scheduler.start()
