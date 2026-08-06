@@ -1,48 +1,82 @@
-"""DB 상태 진단 스크립트"""
+"""파일/썸네일 다운로드 상태 진단
+
+- data/files/ 실제 파일 존재 여부, 크기 확인
+- data/thumbnails/ 실제 이미지 존재 여부, 크기 확인
+- DB File 레코드와 실제 파일 매칭 확인
+"""
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from kosha_crawler.storage import get_session, Media, MediaFile
-from kosha_crawler.config import settings
+from kosha_crawler.storage import get_session, Media, File as DbFile
 
-print("=" * 70)
-print(f"DB_PATH: {settings.DB_PATH}")
-db_path = Path(settings.DB_PATH)
-print(f"DB 파일 존재: {db_path.exists()}")
-if db_path.exists():
-    print(f"DB 파일 크기: {db_path.stat().st_size:,} bytes")
-print("=" * 70)
+DATA_DIR = Path("data")
+FILES_DIR = DATA_DIR / "files"
+THUMBS_DIR = DATA_DIR / "thumbnails"
 
-with get_session() as db:
-    total = db.query(Media).count()
-    pending = db.query(Media).filter(Media.cafe_uploaded_at.is_(None)).count()
-    uploaded = db.query(Media).filter(Media.cafe_uploaded_at.isnot(None)).count()
-    with_error = db.query(Media).filter(Media.cafe_upload_error.isnot(None)).count()
 
-    print(f"\n[Media 통계]")
-    print(f"  전체:            {total}건")
-    print(f"  카페 미업로드:   {pending}건 (재시도 대상)")
-    print(f"  카페 업로드완료: {uploaded}건")
-    print(f"  에러 이력 있음:  {with_error}건")
-
-    file_count = db.query(MediaFile).count()
-    print(f"\n[File 통계]")
-    print(f"  전체 파일: {file_count}건")
-
-    print(f"\n[최근 Media 10건]")
-    recent = db.query(Media).order_by(Media.crawled_at.desc()).limit(10).all()
-    for m in recent:
-        if m.cafe_uploaded_at:
-            status = "[OK]"
-        elif m.cafe_upload_error:
-            status = "[ERR]"
-        else:
-            status = "[WAIT]"
-        title = (m.title or "")[:45]
-        print(f"  [{m.med_seq}] {status} {title}")
-        if m.cafe_upload_error:
-            err = m.cafe_upload_error[:80]
-            print(f"         -> {err}")
-
+def main():
     print("=" * 70)
+    print("파일/썸네일 진단")
+    print("=" * 70)
+
+    # 폴더 실물 확인
+    print(f"\n[data/files/]")
+    if FILES_DIR.exists():
+        files = list(FILES_DIR.iterdir())
+        print(f"  파일 개수: {len(files)}")
+        total_size = sum(f.stat().st_size for f in files if f.is_file())
+        print(f"  총 용량: {total_size:,} bytes")
+        for f in files[:10]:
+            if f.is_file():
+                print(f"  - {f.name} ({f.stat().st_size:,} bytes)")
+        if len(files) > 10:
+            print(f"  ... 외 {len(files)-10}개")
+    else:
+        print("  ❌ 폴더 없음!")
+
+    print(f"\n[data/thumbnails/]")
+    if THUMBS_DIR.exists():
+        thumbs = list(THUMBS_DIR.iterdir())
+        print(f"  파일 개수: {len(thumbs)}")
+        total_size = sum(f.stat().st_size for f in thumbs if f.is_file())
+        print(f"  총 용량: {total_size:,} bytes")
+        for f in thumbs[:10]:
+            if f.is_file():
+                print(f"  - {f.name} ({f.stat().st_size:,} bytes)")
+        if len(thumbs) > 10:
+            print(f"  ... 외 {len(thumbs)-10}개")
+    else:
+        print("  ❌ 폴더 없음!")
+
+    # DB와 실물 대조
+    print(f"\n[DB ↔ 실물 대조 - 최근 미디어 5건]")
+    with get_session() as db:
+        medias = db.query(Media).order_by(Media.med_seq.desc()).limit(5).all()
+        for m in medias:
+            print(f"\n  [{m.med_seq}] {(m.title or '')[:40]}")
+            print(f"    thumbnail_path DB값: {m.thumbnail_path}")
+            if m.thumbnail_path:
+                p = Path(m.thumbnail_path)
+                if p.exists():
+                    print(f"    ✅ 썸네일 실물 존재: {p.stat().st_size:,} bytes")
+                else:
+                    print(f"    ❌ 썸네일 실물 없음")
+
+            for f in m.files:
+                print(f"    파일: {f.original_name}")
+                print(f"      local_path DB값: {f.local_path}")
+                print(f"      DB size 필드: {f.size}")
+                if f.local_path:
+                    p = Path(f.local_path)
+                    if p.exists():
+                        print(f"      ✅ 실물 존재: {p.stat().st_size:,} bytes")
+                    else:
+                        print(f"      ❌ 실물 없음")
+
+    print("\n" + "=" * 70)
+
+
+if __name__ == "__main__":
+    main()
