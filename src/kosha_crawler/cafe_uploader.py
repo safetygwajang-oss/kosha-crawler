@@ -1,5 +1,4 @@
 """네이버 카페에 크롤링 결과를 게시글로 업로드"""
-import re
 import urllib.parse
 from pathlib import Path
 from datetime import datetime
@@ -12,21 +11,22 @@ from .utils import setup_logging
 log = setup_logging("cafe_uploader")
 
 
-# ms949(cp949) 인코딩 불가 문자(이모지 등) 제거용
-_NON_MS949_RE = re.compile(
-    r'[\U0001F300-\U0001FAFF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF'
-    r'\U0001F900-\U0001F9FF\u2600-\u27BF\u2300-\u23FF]'
-)
-
-
 def _sanitize_for_ms949(text: str) -> str:
-    """ms949로 인코딩할 수 없는 이모지/특수문자 제거 (safety net)"""
+    """ms949(cp949)로 인코딩 불가능한 모든 문자(이모지 등)를 공백으로 대체.
+    한 글자씩 encode 시도하는 방식으로 100% 안전.
+    """
     if not text:
         return ""
-    # 1차: 알려진 이모지 범위 제거
-    text = _NON_MS949_RE.sub('', text)
-    # 2차: 실제 encode 시도해서 실패 문자는 대체
-    return text.encode('ms949', errors='ignore').decode('ms949')
+    result = []
+    for ch in text:
+        try:
+            ch.encode('ms949')
+            result.append(ch)
+        except UnicodeEncodeError:
+            # 이모지 등 인코딩 불가 → 공백으로 대체
+            result.append(' ')
+    # 연속 공백 정리
+    return ''.join(result)
 
 
 def _build_content(media: Media) -> str:
@@ -34,21 +34,28 @@ def _build_content(media: Media) -> str:
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
+    # 제목/설명 모두 sanitize (DB 원본에 이모지가 있을 수 있음)
+    safe_title = _sanitize_for_ms949(media.title or "")
+    safe_desc = _sanitize_for_ms949(media.description or "")
+    safe_pbls = _sanitize_for_ms949(media.pbls_no or "")
+    safe_shp = _sanitize_for_ms949(media.shp_nm or "")
+
     file_lines = []
     for f in media.files:
-        file_lines.append(f"• {f.original_name} ({f.size:,} bytes)")
+        safe_name = _sanitize_for_ms949(f.original_name or "")
+        file_lines.append(f"- {safe_name} ({f.size:,} bytes)")
     files_block = "<br>".join(file_lines) if file_lines else "(첨부파일 없음)"
 
     parts = [
-        f"<h3>{media.title}</h3>",
+        f"<h3>{safe_title}</h3>",
         f"<p><b>등록일:</b> {reg_fmt}<br>",
-        f"<b>발행번호:</b> {media.pbls_no}<br>",
-        f"<b>유형:</b> {media.shp_nm}</p>",
+        f"<b>발행번호:</b> {safe_pbls}<br>",
+        f"<b>유형:</b> {safe_shp}</p>",
         "<hr>",
-        f"<p>{(media.description or '').replace(chr(10), '<br>')}</p>",
+        f"<p>{safe_desc.replace(chr(10), '<br>')}</p>",
         "<hr>",
         f"<p><b>[첨부파일]</b><br>{files_block}</p>",
-        f"<p><small>※ KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
+        f"<p><small>KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
     ]
     return "\n".join(parts)
 
@@ -59,9 +66,11 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
     headers = {"Authorization": f"Bearer {token}"}
 
     # 네이버 카페 API는 ms949 인코딩 요구 → 이모지 제거 필수
-    raw_subject = f"[KOSHA] {media.title}"
+    safe_title = _sanitize_for_ms949(media.title or "")
+    raw_subject = f"[KOSHA] {safe_title}"
     raw_content = _build_content(media)
 
+    # 최종 안전망 (혹시 몰라 한 번 더)
     safe_subject = _sanitize_for_ms949(raw_subject)
     safe_content = _sanitize_for_ms949(raw_content)
 
