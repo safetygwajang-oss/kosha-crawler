@@ -1,11 +1,10 @@
-"""네이버 카페 업로드 (이미지 첨부 + KOSHA 원본 링크)
+"""네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
 
 ✅ 인코딩: 이중 URL 인코딩 (검증됨)
-✅ 이미지 첨부: KOSHA 썸네일을 즉시 다운로드해 image 필드로 multipart 전송
-✅ PDF 등 파일: 본문에 KOSHA 원본 링크 삽입 (네이버 API는 이미지만 지원)
+✅ 이미지: DB의 thumbnail_path 로컬 파일을 image 필드로 multipart 전송
+✅ 파일: 본문에 KOSHA 원본 링크 삽입 (네이버 API가 이미지만 지원)
 """
 import time
-import tempfile
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote
@@ -20,13 +19,8 @@ log = setup_logging("cafe_uploader")
 UPLOAD_INTERVAL_SEC = 25
 FAILURE_BACKOFF_SEC = 60
 
-# KOSHA 원본 상세 페이지 URL 템플릿 (med_seq 기반)
-# 실제 KOSHA 사이트 구조에 맞게 필요시 조정
-KOSHA_DETAIL_URL = "https://www.kosha.or.kr/kosha/report/medFocData.do?medSeq={med_seq}"
-
-# 네이버 카페 이미지 첨부 제한
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif"}
+# KOSHA 원본 상세 페이지 (사용자 확인 필요 - 아래 STEP 3 참고)
+KOSHA_DETAIL_URL = "https://www.kosha.or.kr/kosha/report/mediaBankMainPage.do?medSeq={med_seq}"
 
 
 def naver_double_encode(text: str) -> str:
@@ -36,67 +30,13 @@ def naver_double_encode(text: str) -> str:
     return quote(quote(text, safe=''), safe='')
 
 
-def _download_thumbnail(media: Media) -> Path | None:
-    """KOSHA 썸네일을 임시 파일로 즉시 다운로드.
-    성공 시 파일 경로 반환, 실패 시 None.
-    호출자가 사용 후 파일 삭제 책임.
-    """
-    if not media.thumbnail_url:
-        return None
-
-    try:
-        # 절대 URL 조립
-        url = media.thumbnail_url
-        if url.startswith("/"):
-            url = settings.KOSHA_BASE_URL.rstrip("/") + url
-
-        r = requests.get(url, timeout=30, stream=True)
-        if r.status_code != 200:
-            log.warning(f"  썸네일 다운로드 실패 HTTP {r.status_code}: {url}")
-            return None
-
-        # 확장자 추출 (Content-Type 우선, URL suffix 보조)
-        ct = r.headers.get("Content-Type", "").lower()
-        if "png" in ct:
-            ext = ".png"
-        elif "gif" in ct:
-            ext = ".gif"
-        else:
-            ext = ".jpg"
-
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-        size = 0
-        for chunk in r.iter_content(8192):
-            tmp.write(chunk)
-            size += len(chunk)
-            if size > MAX_IMAGE_SIZE:
-                tmp.close()
-                Path(tmp.name).unlink(missing_ok=True)
-                log.warning(f"  썸네일 크기 초과({size}): {url}")
-                return None
-        tmp.close()
-
-        if size == 0:
-            Path(tmp.name).unlink(missing_ok=True)
-            return None
-
-        log.info(f"  썸네일 다운로드 완료: {size:,} bytes ({ext})")
-        return Path(tmp.name)
-
-    except Exception as e:
-        log.warning(f"  썸네일 다운로드 예외: {e}")
-        return None
-
-
 def _build_content(media: Media) -> str:
-    """게시글 본문 HTML (원본 링크 포함)"""
+    """게시글 본문 HTML"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
-    # KOSHA 원본 페이지 링크
     kosha_link = KOSHA_DETAIL_URL.format(med_seq=media.med_seq)
 
-    # 파일 목록 (KOSHA 원본에서 다운로드 안내)
     file_lines = []
     for f in media.files:
         file_lines.append(f"📎 {f.original_name}")
@@ -114,19 +54,29 @@ def _build_content(media: Media) -> str:
         "<hr>",
         f"<p>{desc}</p>",
         "<hr>",
-        f"<p><b>📥 첨부파일 다운로드</b><br>",
-        f"{files_block}<br><br>",
-        f"👉 <a href='{kosha_link}' target='_blank'><b>KOSHA 원본 페이지에서 다운로드</b></a><br>",
-        f"<small>({kosha_link})</small>",
-        f"</p>",
+        f"<p><b>📥 첨부파일 (KOSHA 원본에서 다운로드)</b><br>",
+        f"{files_block}</p>",
+        f"<p>👉 <a href='{kosha_link}' target='_blank'><b>KOSHA 안전보건자료실 바로가기</b></a><br>",
+        f"<small>{kosha_link}</small></p>",
         "<hr>",
         f"<p><small>🤖 KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
     ]
     return "\n".join(parts)
 
 
+def _get_thumbnail_path(media: Media) -> Path | None:
+    """DB에 저장된 썸네일 경로에서 실물 확인"""
+    if not media.thumbnail_path:
+        return None
+    p = Path(media.thumbnail_path)
+    if p.exists() and p.stat().st_size > 0:
+        return p
+    log.warning(f"  썸네일 실물 없음: {media.thumbnail_path}")
+    return None
+
+
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건을 카페에 업로드 (이미지 첨부 시도)"""
+    """미디어 1건 업로드 - 썸네일 있으면 image 첨부, 없으면 텍스트만"""
     token = token_mgr.get_token()
 
     subject_raw = f"[KOSHA] {media.title or ''}"
@@ -135,44 +85,37 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
     subject_encoded = naver_double_encode(subject_raw)
     content_encoded = naver_double_encode(content_raw)
 
-    # 썸네일 즉시 다운로드 시도
-    thumb_path = _download_thumbnail(media)
+    thumb_path = _get_thumbnail_path(media)
 
-    try:
-        if thumb_path and thumb_path.exists():
-            # multipart로 이미지 첨부
-            mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
-            with thumb_path.open("rb") as fp:
-                files = {
-                    "subject": (None, subject_encoded),
-                    "content": (None, content_encoded),
-                    "image": (thumb_path.name, fp.read(), mime, {"Expires": "0"}),
-                }
-                r = requests.post(
-                    settings.cafe_article_api,
-                    headers={"Authorization": f"Bearer {token}"},
-                    files=files,
-                    timeout=60,
-                )
-        else:
-            # 이미지 없이 form-urlencoded
-            body = f"subject={subject_encoded}&content={content_encoded}"
-            r = requests.post(
-                settings.cafe_article_api,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                data=body.encode("utf-8"),
-                timeout=60,
-            )
-    finally:
-        # 임시 파일 정리
-        if thumb_path:
-            try:
-                thumb_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+    if thumb_path:
+        # multipart with image
+        mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
+        with thumb_path.open("rb") as fp:
+            img_bytes = fp.read()
+        files = {
+            "subject": (None, subject_encoded),
+            "content": (None, content_encoded),
+            "image": (thumb_path.name, img_bytes, mime, {"Expires": "0"}),
+        }
+        log.info(f"  📷 썸네일 첨부: {thumb_path.name} ({len(img_bytes):,} bytes)")
+        r = requests.post(
+            settings.cafe_article_api,
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+            timeout=60,
+        )
+    else:
+        # text only
+        body = f"subject={subject_encoded}&content={content_encoded}"
+        r = requests.post(
+            settings.cafe_article_api,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data=body.encode("utf-8"),
+            timeout=60,
+        )
 
     if r.status_code != 200:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
