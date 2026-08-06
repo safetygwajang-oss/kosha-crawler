@@ -1,8 +1,11 @@
-"""네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
+"""네이버 카페 업로드 - 네이버 공식 문서 방식 준수
 
-✅ multipart로 이미지 첨부 (네이버 카페가 본문에 자동 삽입)
-✅ subject/content는 이중 URL 인코딩 (한글 깨짐 방지)
-✅ 본문 줄바꿈은 <br> 태그로 변환
+📖 참고: https://developers.naver.com/docs/login/cafe-api/cafe-api.md
+📖 참고: github.com/naver/naver-openapi-guide
+
+✅ multipart 방식일 때: subject/content = 단일 URL 인코딩, 이미지 필드명 = "0"
+✅ urlencoded 방식일 때: subject/content = 이중 URL 인코딩
+✅ 본문 줄바꿈은 <br> 태그
 """
 import time
 from pathlib import Path
@@ -19,7 +22,6 @@ log = setup_logging("cafe_uploader")
 UPLOAD_INTERVAL_SEC = 25
 FAILURE_BACKOFF_SEC = 60
 
-# KOSHA 자료실
 KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arch"
 
 
@@ -28,16 +30,21 @@ KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arc
 # ============================================
 
 def naver_double_encode(text: str) -> str:
-    """네이버 카페 API 전용 이중 URL 인코딩"""
+    """이중 URL 인코딩 (urlencoded 방식용)"""
     if not text:
         return ""
-    first = quote(text, safe='')
-    second = quote(first, safe='')
-    return second
+    return quote(quote(text, safe=''), safe='')
+
+
+def naver_single_encode(text: str) -> str:
+    """단일 URL 인코딩 (multipart 방식용 - 네이버 공식 문서 기준)"""
+    if not text:
+        return ""
+    return quote(text, safe='', encoding='utf-8')
 
 
 def convert_newlines_to_br(text: str) -> str:
-    """줄바꿈을 <br>로 변환 (네이버 카페 API가 \\n 무시함)"""
+    """줄바꿈을 <br>로 변환"""
     if not text:
         return text
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -50,11 +57,10 @@ def convert_newlines_to_br(text: str) -> str:
 # ============================================
 
 def _build_content(media: Media) -> str:
-    """게시글 본문 HTML"""
+    """게시글 본문 HTML (이미지는 multipart로 자동 삽입되므로 <img> 태그 X)"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
-    # KOSHA 자료실 검색 링크 (제목으로 검색)
     search_kw = quote(media.title or "", safe='')
     kosha_search = f"{KOSHA_ARCHIVE_HOME}?searchKeyword={search_kw}"
 
@@ -79,7 +85,7 @@ def _build_content(media: Media) -> str:
 
 
 def _get_thumbnail_path(media: Media) -> Path | None:
-    """DB에 저장된 썸네일 경로에서 실물 확인"""
+    """DB에 저장된 썸네일 실물 파일 확인"""
     if not media.thumbnail_path:
         return None
     p = Path(media.thumbnail_path)
@@ -90,37 +96,41 @@ def _get_thumbnail_path(media: Media) -> Path | None:
 
 
 # ============================================
-# 🚀 업로드 (multipart + 이중 인코딩 조합)
+# 🚀 업로드 - 네이버 공식 문서 기반
 # ============================================
 
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건 업로드 - 썸네일 있으면 image 첨부, 없으면 텍스트만"""
+    """미디어 1건 업로드
+    - 썸네일 있음 → multipart + 단일인코딩 + 이미지필드명 "0"
+    - 썸네일 없음 → urlencoded + 이중인코딩
+    """
     token = token_mgr.get_token()
 
-    # 원문 생성
     subject_raw = f"[KOSHA] {media.title or ''}"
     content_raw = _build_content(media)
-
-    # ⭐ 본문 줄바꿈 → <br> 변환
     content_html = convert_newlines_to_br(content_raw)
-
-    # ⭐ 이중 인코딩 (제목/본문 동일)
-    subject_encoded = naver_double_encode(subject_raw)
-    content_encoded = naver_double_encode(content_html)
 
     thumb_path = _get_thumbnail_path(media)
 
     if thumb_path:
-        # ✅ multipart with image (네이버가 본문에 자동 첨부)
+        # ✅ multipart 방식 (네이버 공식 자바 예제 준수)
+        # - subject/content: 단일 URL 인코딩
+        # - 이미지 필드명: "0" (네이버 공식)
+        subject_enc = naver_single_encode(subject_raw)
+        content_enc = naver_single_encode(content_html)
+
         mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
         with thumb_path.open("rb") as fp:
             img_bytes = fp.read()
+
         files = {
-            "subject": (None, subject_encoded),
-            "content": (None, content_encoded),
-            "image": (thumb_path.name, img_bytes, mime, {"Expires": "0"}),
+            "subject": (None, subject_enc),
+            "content": (None, content_enc),
+            "0": (thumb_path.name, img_bytes, mime),  # ⭐ 필드명 "0"
         }
-        log.info(f"  📷 썸네일 첨부: {thumb_path.name} ({len(img_bytes):,} bytes)")
+
+        log.info(f"  📷 [multipart] 썸네일: {thumb_path.name} ({len(img_bytes):,} bytes)")
+
         r = requests.post(
             settings.cafe_article_api,
             headers={"Authorization": f"Bearer {token}"},
@@ -128,8 +138,15 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
             timeout=60,
         )
     else:
-        # ✅ urlencoded (텍스트만)
-        body = f"subject={subject_encoded}&content={content_encoded}&openyn=true"
+        # ✅ urlencoded 방식 (검증됨)
+        # - subject/content: 이중 URL 인코딩
+        subject_enc = naver_double_encode(subject_raw)
+        content_enc = naver_double_encode(content_html)
+
+        body = f"subject={subject_enc}&content={content_enc}&openyn=true"
+
+        log.info(f"  📝 [urlencoded] 텍스트 전용")
+
         r = requests.post(
             settings.cafe_article_api,
             headers={
@@ -139,6 +156,8 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
             data=body.encode("ascii"),
             timeout=60,
         )
+
+    log.info(f"  📤 제목: {subject_raw[:60]}")
 
     if r.status_code not in (200, 201):
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
