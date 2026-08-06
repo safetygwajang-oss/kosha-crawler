@@ -1,8 +1,8 @@
 """네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
 
-✅ 인코딩: 이중 URL 인코딩 (urlencoded / multipart 모두 동일)
+✅ 제목: 이중 URL 인코딩 (한글 깨짐 방지)
+✅ 본문: HTML 엔티티 변환 후 → 단일 URL 인코딩 (검증된 방식)
 ✅ 이미지: DB의 thumbnail_path 로컬 파일을 image 필드로 multipart 전송
-✅ 파일: 본문에 KOSHA 자료실 검색 링크 삽입 (네이버 API가 이미지만 지원)
 """
 import time
 from pathlib import Path
@@ -23,12 +23,49 @@ FAILURE_BACKOFF_SEC = 60
 KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arch"
 
 
-def naver_double_encode(text: str) -> str:
-    """네이버 카페 API용 이중 URL 인코딩 (검증됨)"""
+# ============================================
+# 🔧 인코딩 유틸 (검증된 방식)
+# ============================================
+
+def sanitize_for_naver(text: str) -> str:
+    """네이버 카페 업로드용 특수문자 처리 (URL 파라미터 충돌 방지)"""
     if not text:
         return ""
-    return quote(quote(text, safe=''), safe='')
+    # % → 퍼센트 (URL 인코딩 충돌)
+    text = text.replace('%', '퍼센트')
+    # & → 그리고 (URL 파라미터 구분자 충돌) — S&P는 보존
+    text = text.replace('S&P500', 'S&P 500')
+    text = text.replace('S＆P', 'S&P')
+    text = text.replace('S&P', '§§SNP§§')
+    text = text.replace('&', '그리고')
+    text = text.replace('§§SNP§§', 'S&P')
+    return text
 
+
+def to_html_entity(text: str) -> str:
+    """네이버 카페 API용 HTML 엔티티 변환 (본문용)"""
+    result = []
+    for c in text:
+        code = ord(c)
+        if code > 127 or c in '%&=?#':
+            result.append(f"&#{code};")
+        else:
+            result.append(c)
+    return ''.join(result)
+
+
+def naver_double_encode(text: str) -> str:
+    """네이버 카페 API 제목용 이중 URL 인코딩 (한글 깨짐 방지)"""
+    if not text:
+        return ""
+    first = quote(text, safe='')
+    second = quote(first, safe='')
+    return second
+
+
+# ============================================
+# 📝 본문 생성
+# ============================================
 
 def _build_content(media: Media) -> str:
     """게시글 본문 HTML"""
@@ -78,21 +115,31 @@ def _get_thumbnail_path(media: Media) -> Path | None:
     return None
 
 
+# ============================================
+# 🚀 업로드
+# ============================================
+
 def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
     """미디어 1건 업로드 - 썸네일 있으면 image 첨부, 없으면 텍스트만"""
     token = token_mgr.get_token()
 
+    # 🏆 원문 생성
     subject_raw = f"[KOSHA] {media.title or ''}"
     content_raw = _build_content(media)
 
-    # 이중 인코딩 (multipart / urlencoded 모두 동일하게 적용)
-    subject_encoded = naver_double_encode(subject_raw)
-    content_encoded = naver_double_encode(content_raw)
+    # 🏆 제목: sanitize → 이중 인코딩
+    subject_clean = sanitize_for_naver(subject_raw)
+    subject_encoded = naver_double_encode(subject_clean)
+
+    # 🏆 본문: sanitize → HTML 엔티티 변환 → 단일 URL 인코딩
+    content_clean = sanitize_for_naver(content_raw)
+    content_html = to_html_entity(content_clean)
+    content_encoded = quote(content_html)
 
     thumb_path = _get_thumbnail_path(media)
 
     if thumb_path:
-        # multipart with image: 이중 인코딩된 ASCII 문자열을 그대로 전송
+        # multipart with image: 인코딩된 ASCII 문자열을 그대로 전송
         mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
         with thumb_path.open("rb") as fp:
             img_bytes = fp.read()
@@ -109,19 +156,19 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
             timeout=60,
         )
     else:
-        # urlencoded: 이중 인코딩
+        # urlencoded
         body = f"subject={subject_encoded}&content={content_encoded}"
         r = requests.post(
             settings.cafe_article_api,
             headers={
                 "Authorization": f"Bearer {token}",
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
             },
             data=body.encode("utf-8"),
             timeout=60,
         )
 
-    if r.status_code != 200:
+    if r.status_code not in (200, 201):
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
 
     resp = r.json()
