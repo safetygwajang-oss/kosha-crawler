@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       upload_limit:
-        description: "카페 업로드 최대 건수 (기본 30)"
+        description: "카페 업로드 최대 건수 (테스트는 3, 정상운영은 30)"
         required: false
-        default: "30"
+        default: "3"
 
 jobs:
   crawl:
@@ -26,17 +26,21 @@ jobs:
       - name: Install
         run: pip install -r requirements.txt
 
-      - name: Restore DB from artifact
-        uses: dawidd6/action-download-artifact@v3
+      - name: Restore DB + thumbnails from artifact
+        uses: dawidd6/action-download-artifact@v6
         with:
-          name: kosha-db
+          name: kosha-data
           path: data/
+          if_no_artifact_found: warn
         continue-on-error: true
 
       - name: DB 상태 진단 (실행 전)
         run: |
           echo "===== data/ 폴더 내용 ====="
-          ls -lah data/ || echo "data/ 폴더 없음"
+          ls -lah data/ 2>/dev/null || echo "data/ 폴더 없음"
+          echo ""
+          echo "===== data/thumbnails/ 개수 ====="
+          ls data/thumbnails/ 2>/dev/null | wc -l || echo "0"
           echo ""
           echo "===== DB 진단 ====="
           python scripts/diagnose_db.py || echo "진단 스킵"
@@ -60,7 +64,7 @@ jobs:
           NAVER_CAFE_CLUB_ID:   "31767633"
           NAVER_CAFE_MENU_ID:   "12"
           NAVER_UPLOAD_ENABLED: "true"
-          UPLOAD_LIMIT: ${{ github.event.inputs.upload_limit || '30' }}
+          UPLOAD_LIMIT: ${{ github.event.inputs.upload_limit || '3' }}
         run: python scripts/upload_only.py
 
       - name: DB 상태 진단 (실행 후)
@@ -69,15 +73,20 @@ jobs:
           echo "===== data/ 폴더 내용 ====="
           ls -lah data/
           echo ""
+          echo "===== data/thumbnails/ 개수 ====="
+          ls data/thumbnails/ 2>/dev/null | wc -l || echo "0"
+          echo ""
           echo "===== DB 진단 ====="
           python scripts/diagnose_db.py || true
 
-      - name: Upload DB
+      - name: Upload DB + thumbnails artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kosha-db
-          path: data/kosha.db
+          name: kosha-data
+          path: |
+            data/kosha.db
+            data/thumbnails/
           retention-days: 90
           overwrite: true
 
