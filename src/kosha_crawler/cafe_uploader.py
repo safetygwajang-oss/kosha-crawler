@@ -1,9 +1,13 @@
 """네이버 카페에 크롤링 결과를 게시글로 업로드
 
-인코딩 방식: 네이버 공식 문서 + Python 성공 사례 기반
-- urllib.parse.quote()로 UTF-8 URL 인코딩
-- data를 dict가 아닌 문자열로 조립 (requests dict 자동 인코딩 회피)
-- 첨부파일이 있으면 multipart, 없으면 x-www-form-urlencoded
+✅ 검증된 인코딩 방식: 이중 URL 인코딩 (Double URL Encoding)
+   - quote(quote(text, safe=''), safe='')
+   - Content-Type: application/x-www-form-urlencoded
+   - body는 문자열로 조립 후 UTF-8 바이트로 전송
+   
+   네이버 카페 서버가 MS949 환경이라 UTF-8 %인코딩 문자열(%EC%9D...)을
+   한 번 더 %인코딩해서(%25EC%259D...) 보내면 서버가 두 번 디코딩하여
+   원래 한글로 정상 복원됨.
 """
 import time
 from pathlib import Path
@@ -23,8 +27,21 @@ UPLOAD_INTERVAL_SEC = 25
 FAILURE_BACKOFF_SEC = 60
 
 
+def naver_double_encode(text: str) -> str:
+    """네이버 카페 API용 이중 URL 인코딩.
+    
+    한글 → %EC%9D%B4... → %25EC%259D%25B4...
+    네이버 서버가 두 번 디코딩하여 원래 한글로 복원.
+    """
+    if not text:
+        return ""
+    first = quote(text, safe='')
+    second = quote(first, safe='')
+    return second
+
+
 def _build_content(media: Media) -> str:
-    """게시글 HTML 본문 구성 (원본 한글 그대로)"""
+    """게시글 HTML 본문 구성 (원본 한글 그대로 - 인코딩은 전송 직전에)"""
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
@@ -49,71 +66,35 @@ def _build_content(media: Media) -> str:
     return "\n".join(parts)
 
 
-def _post_without_image(url: str, token: str, subject: str, content: str) -> requests.Response:
-    """이미지 첨부 없이 게시글 등록 (application/x-www-form-urlencoded).
+def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
+    """미디어 1건을 카페에 업로드.
     
-    ✅ 네이버 공식 방식:
-    1. quote()로 한글 → UTF-8 URL 인코딩 (%EC%9D%B4...)
-    2. dict가 아닌 문자열로 body 조립
-    3. .encode('utf-8')로 바이트 전송
+    ✅ 검증된 방식: 이중 URL 인코딩 + 문자열 body + UTF-8 전송
     """
-    encoded_subject = quote(subject)
-    encoded_content = quote(content)
-    body = f"subject={encoded_subject}&content={encoded_content}"
+    token = token_mgr.get_token()
+
+    # 원본 한글 텍스트 준비
+    subject_raw = f"[KOSHA] {media.title or ''}"
+    content_raw = _build_content(media)
+
+    # 네이버 이중 인코딩 적용
+    subject_encoded = naver_double_encode(subject_raw)
+    content_encoded = naver_double_encode(content_raw)
+
+    # 문자열 body 조립 (dict 사용 금지 - requests가 자동 인코딩 시도함)
+    body = f"subject={subject_encoded}&content={content_encoded}"
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    return requests.post(
-        url,
+
+    r = requests.post(
+        settings.cafe_article_api,
         headers=headers,
         data=body.encode("utf-8"),
         timeout=60,
     )
-
-
-def _post_with_image(url: str, token: str, subject: str, content: str,
-                     thumb_path: Path) -> requests.Response:
-    """이미지 첨부 있는 게시글 등록 (multipart/form-data).
-    
-    multipart일 때는 requests가 각 필드를 UTF-8로 넣으므로
-    subject/content는 quote()로 미리 URL 인코딩한 문자열을 전달.
-    """
-    encoded_subject = quote(subject)
-    encoded_content = quote(content)
-
-    headers = {"Authorization": f"Bearer {token}"}
-
-    mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
-    with thumb_path.open("rb") as fp:
-        files = {
-            "subject": (None, encoded_subject),
-            "content": (None, encoded_content),
-            "image": (thumb_path.name, fp.read(), mime),
-        }
-        return requests.post(url, headers=headers, files=files, timeout=60)
-
-
-def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
-    """미디어 1건을 카페에 업로드."""
-    token = token_mgr.get_token()
-
-    subject = f"[KOSHA] {media.title or ''}"
-    content = _build_content(media)
-
-    # 첨부 이미지 유무에 따라 다른 방식 사용
-    has_thumb = bool(media.thumbnail_path and Path(media.thumbnail_path).exists())
-
-    if has_thumb:
-        r = _post_with_image(
-            settings.cafe_article_api, token, subject, content,
-            Path(media.thumbnail_path)
-        )
-    else:
-        r = _post_without_image(
-            settings.cafe_article_api, token, subject, content
-        )
 
     if r.status_code != 200:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
