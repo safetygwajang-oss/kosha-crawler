@@ -1,9 +1,9 @@
-name: Daily KOSHA Crawl
+name: Daily KOSHA Crawl & Cafe Upload
 
 on:
   schedule:
     - cron: "0 21 * * *"   # UTC 21시 = KST 06시
-  workflow_dispatch:        # 수동 실행 버튼
+  workflow_dispatch:
 
 jobs:
   crawl:
@@ -27,21 +27,29 @@ jobs:
           path: data/
         continue-on-error: true
 
-      - name: Run crawler
+      - name: Run crawler + cafe upload
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          NAVER_CLIENT_ID:      ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET:  ${{ secrets.NAVER_CLIENT_SECRET }}
+          NAVER_REFRESH_TOKEN:  ${{ secrets.NAVER_REFRESH_TOKEN }}
+          NAVER_CAFE_CLUB_ID:   "31767633"
+          NAVER_CAFE_MENU_ID:   "12"
+          NAVER_UPLOAD_ENABLED: "true"
+          SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python scripts/run_once.py
 
       - name: Upload DB
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kosha-db
           path: data/kosha.db
           retention-days: 90
 
-      - name: Upload data
+      - name: Upload logs
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: kosha-data-${{ github.run_number }}
-          path: data/
-          retention-days: 30
+          name: logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 14
