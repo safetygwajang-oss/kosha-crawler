@@ -2,7 +2,7 @@
 
 ✅ 인코딩: 이중 URL 인코딩 (검증됨)
 ✅ 이미지: DB의 thumbnail_path 로컬 파일을 image 필드로 multipart 전송
-✅ 파일: 본문에 KOSHA 원본 링크 삽입 (네이버 API가 이미지만 지원)
+✅ 파일: 본문에 KOSHA 자료실 검색 링크 삽입 (네이버 API가 이미지만 지원)
 """
 import time
 from pathlib import Path
@@ -19,8 +19,8 @@ log = setup_logging("cafe_uploader")
 UPLOAD_INTERVAL_SEC = 25
 FAILURE_BACKOFF_SEC = 60
 
-# KOSHA 원본 상세 페이지 (사용자 확인 필요 - 아래 STEP 3 참고)
-KOSHA_DETAIL_URL = "https://www.kosha.or.kr/kosha/report/mediaBankMainPage.do?medSeq={med_seq}"
+# KOSHA 자료실
+KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arch"
 
 
 def naver_double_encode(text: str) -> str:
@@ -35,7 +35,9 @@ def _build_content(media: Media) -> str:
     reg = media.reg_date or ""
     reg_fmt = f"{reg[:4]}-{reg[4:6]}-{reg[6:8]}" if len(reg) == 8 else reg
 
-    kosha_link = KOSHA_DETAIL_URL.format(med_seq=media.med_seq)
+    # KOSHA 자료실 검색 링크 (제목으로 검색)
+    search_kw = quote(media.title or "", safe='')
+    kosha_search = f"{KOSHA_ARCHIVE_HOME}?searchKeyword={search_kw}"
 
     file_lines = []
     for f in media.files:
@@ -49,15 +51,16 @@ def _build_content(media: Media) -> str:
         f"<p>",
         f"<b>📅 등록일:</b> {reg_fmt}<br>",
         f"<b>📄 발행번호:</b> {media.pbls_no or ''}<br>",
-        f"<b>📂 유형:</b> {media.shp_nm or ''}",
+        f"<b>📂 유형:</b> {media.shp_nm or ''}<br>",
+        f"<b>🔖 자료번호:</b> {media.med_seq}",
         f"</p>",
         "<hr>",
         f"<p>{desc}</p>",
         "<hr>",
         f"<p><b>📥 첨부파일 (KOSHA 원본에서 다운로드)</b><br>",
         f"{files_block}</p>",
-        f"<p>👉 <a href='{kosha_link}' target='_blank'><b>KOSHA 안전보건자료실 바로가기</b></a><br>",
-        f"<small>{kosha_link}</small></p>",
+        f"<p>👉 <a href='{kosha_search}' target='_blank'><b>KOSHA에서 이 자료 검색하기</b></a><br>",
+        f"👉 <a href='{KOSHA_ARCHIVE_HOME}' target='_blank'>KOSHA 안전보건자료실 바로가기</a></p>",
         "<hr>",
         f"<p><small>🤖 KOSHA 자동 수집 · {datetime.now():%Y-%m-%d %H:%M}</small></p>",
     ]
