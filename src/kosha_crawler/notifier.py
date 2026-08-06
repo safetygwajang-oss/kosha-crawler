@@ -10,4 +10,4 @@ def notify(message: str) -> None:
         try:
             requests.post(url, json={"text": message}, timeout=10)
         except Exception:
-            pass  # 알림 실패는 무시
+            pass
