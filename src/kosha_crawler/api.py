@@ -51,6 +51,10 @@ class KoshaAPI:
     def download_file(self, atcfl_no: str, atcfl_seq: int) -> bytes:
         payload = {"atcflNo": atcfl_no, "atcflSeq": atcfl_seq}
         r = self.s.post(settings.download_api, json=payload, timeout=settings.DOWNLOAD_TIMEOUT)
+        log.info(f"    [DL API] status={r.status_code} "
+                 f"content-type={r.headers.get('Content-Type')} "
+                 f"content-length={r.headers.get('Content-Length')} "
+                 f"actual-size={len(r.content)}")
         r.raise_for_status()
         return r.content
 
