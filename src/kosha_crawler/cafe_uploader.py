@@ -1,8 +1,6 @@
 """네이버 카페 업로드 (썸네일 이미지 첨부 + KOSHA 원본 링크)
 
-✅ 인코딩:
-   - urlencoded (텍스트만): 이중 URL 인코딩
-   - multipart (이미지 첨부): 원문 그대로 (인코딩 X)
+✅ 인코딩: 이중 URL 인코딩 (urlencoded / multipart 모두 동일)
 ✅ 이미지: DB의 thumbnail_path 로컬 파일을 image 필드로 multipart 전송
 ✅ 파일: 본문에 KOSHA 자료실 검색 링크 삽입 (네이버 API가 이미지만 지원)
 """
@@ -26,7 +24,7 @@ KOSHA_ARCHIVE_HOME = "https://portal.kosha.or.kr/archive/cent-archive/master-arc
 
 
 def naver_double_encode(text: str) -> str:
-    """네이버 카페 API용 이중 URL 인코딩 (urlencoded 방식일 때만 사용)"""
+    """네이버 카페 API용 이중 URL 인코딩 (검증됨)"""
     if not text:
         return ""
     return quote(quote(text, safe=''), safe='')
@@ -87,16 +85,20 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
     subject_raw = f"[KOSHA] {media.title or ''}"
     content_raw = _build_content(media)
 
+    # 이중 인코딩 (multipart / urlencoded 모두 동일하게 적용)
+    subject_encoded = naver_double_encode(subject_raw)
+    content_encoded = naver_double_encode(content_raw)
+
     thumb_path = _get_thumbnail_path(media)
 
     if thumb_path:
-        # multipart with image: 원문 그대로 전송 (인코딩 X)
+        # multipart with image: 이중 인코딩된 ASCII 문자열을 그대로 전송
         mime = "image/png" if thumb_path.suffix.lower() == ".png" else "image/jpeg"
         with thumb_path.open("rb") as fp:
             img_bytes = fp.read()
         files = {
-            "subject": (None, subject_raw.encode("utf-8"), "text/plain; charset=utf-8"),
-            "content": (None, content_raw.encode("utf-8"), "text/plain; charset=utf-8"),
+            "subject": (None, subject_encoded),
+            "content": (None, content_encoded),
             "image": (thumb_path.name, img_bytes, mime, {"Expires": "0"}),
         }
         log.info(f"  📷 썸네일 첨부: {thumb_path.name} ({len(img_bytes):,} bytes)")
@@ -108,8 +110,6 @@ def upload_article(token_mgr: NaverTokenManager, media: Media) -> dict:
         )
     else:
         # urlencoded: 이중 인코딩
-        subject_encoded = naver_double_encode(subject_raw)
-        content_encoded = naver_double_encode(content_raw)
         body = f"subject={subject_encoded}&content={content_encoded}"
         r = requests.post(
             settings.cafe_article_api,
