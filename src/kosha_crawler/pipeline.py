@@ -8,6 +8,7 @@ from .downloader import save_thumbnail, save_file
 from .storage import get_session, Media, MediaFile, is_media_seen, is_file_downloaded
 from .utils import setup_logging
 from .notifier import notify
+from .cafe_uploader import upload_pending
 
 log = setup_logging()
 
@@ -29,14 +30,12 @@ def crawl_page(api: KoshaAPI, page: int) -> dict:
 
             log.info(f"NEW [{med_seq}] {title}")
 
-            # 썸네일
             thumb_path = None
             try:
                 thumb_path = save_thumbnail(api, med_seq, it.get("medThumbnailPath", ""))
             except Exception as e:
                 log.warning(f"  썸네일 실패: {e}")
 
-            # 미디어 저장
             media = Media(
                 med_seq=med_seq,
                 title=title,
@@ -51,7 +50,6 @@ def crawl_page(api: KoshaAPI, page: int) -> dict:
             db.add(media)
             stats["new_media"] += 1
 
-            # 첨부파일
             if it.get("contsAtcflNo"):
                 try:
                     files = api.get_files(it["contsAtcflNo"])
@@ -91,7 +89,8 @@ def crawl(max_pages: int | None = None) -> dict:
 
     session = build_session()
     api = KoshaAPI(session)
-    total = {"new_media": 0, "new_files": 0, "skipped": 0, "errors": 0, "pages": 0}
+    total = {"new_media": 0, "new_files": 0, "skipped": 0, "errors": 0, "pages": 0,
+             "cafe_uploaded": 0, "cafe_errors": 0}
 
     try:
         for page in range(1, max_pages + 1):
@@ -100,16 +99,27 @@ def crawl(max_pages: int | None = None) -> dict:
             total["pages"] += 1
             for k in ["new_media", "new_files", "skipped", "errors"]:
                 total[k] += stats[k]
-            # 신규가 하나도 없는 페이지면 조기 종료 (증분 크롤링)
             if stats["new_media"] == 0 and page > 1:
                 log.info(f"신규 없음 → 조기 종료 (page {page})")
                 break
     finally:
         elapsed = (datetime.now() - started).total_seconds()
         log.info(
-            f"===== 완료: {total['new_media']}건 신규, {total['new_files']}파일 다운, "
-            f"{total['skipped']} 스킵, {total['errors']} 에러, {elapsed:.1f}s ====="
+            f"===== 크롤링 완료: 신규 {total['new_media']}건, "
+            f"파일 {total['new_files']}개, 에러 {total['errors']} ({elapsed:.1f}s) ====="
         )
-        notify(f"[KOSHA] 신규 {total['new_media']} / 파일 {total['new_files']} / 에러 {total['errors']} ({elapsed:.0f}s)")
+
+        # 네이버 카페 자동 업로드
+        if settings.NAVER_UPLOAD_ENABLED and total["new_media"] > 0:
+            log.info("===== 네이버 카페 업로드 시작 =====")
+            upload_stats = upload_pending(limit=total["new_media"])
+            total["cafe_uploaded"] = upload_stats.get("uploaded", 0)
+            total["cafe_errors"] = upload_stats.get("errors", 0)
+            log.info(f"===== 카페 업로드 결과: {upload_stats} =====")
+
+        notify(
+            f"[KOSHA] 신규 {total['new_media']}건 / 파일 {total['new_files']}개 / "
+            f"카페 {total['cafe_uploaded']}건 ({elapsed:.0f}s)"
+        )
 
     return total
